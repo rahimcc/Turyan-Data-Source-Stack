@@ -1,0 +1,258 @@
+# =============================================================================
+# SOURCE STACK
+#   PostgreSQL  : app database (shop) + Twenty's database, CDC-ready
+#   Twenty CRM  : server + worker + redis (stores data in PostgreSQL above)
+#   ERPNext     : Frappe services + its own MariaDB (binlog on for CDC)
+# =============================================================================
+name: sources
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "10m", max-file: "3" }
+
+x-erpnext: &erpnext
+  image: ${ERPNEXT_IMAGE}
+  restart: unless-stopped
+  logging: *logging
+  volumes:
+    - erpnext-sites:/home/frappe/frappe-bench/sites
+    - erpnext-logs:/home/frappe/frappe-bench/logs
+  environment:
+    FRAPPE_REDIS_CACHE: redis://erpnext-redis-cache:6379
+    FRAPPE_REDIS_QUEUE: redis://erpnext-redis-queue:6379
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: ${POSTGRES_IMAGE}
+    container_name: postgres
+    restart: unless-stopped
+    command: >
+      postgres -c wal_level=logical -c max_replication_slots=6
+      -c max_wal_senders=6 -c shared_buffers=128MB
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: shop
+      DEBEZIUM_PASSWORD: ${DEBEZIUM_PASSWORD}
+      AIRBYTE_READER_PASSWORD: ${AIRBYTE_READER_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    ports: ["${BIND_ADDRESS}:${POSTGRES_PORT}:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d shop"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    deploy: { resources: { limits: { cpus: "0.5", memory: 512m } } }
+    logging: *logging
+
+  # ---------------------------------------------------------------------------
+  # Twenty CRM
+  # ---------------------------------------------------------------------------
+  twenty-redis:
+    image: redis:7-alpine
+    container_name: twenty-redis
+    restart: unless-stopped
+    command: ["--maxmemory-policy", "noeviction"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    deploy: { resources: { limits: { cpus: "0.2", memory: 128m } } }
+    logging: *logging
+
+  twenty-server:
+    image: ${TWENTY_IMAGE}
+    container_name: twenty-server
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+      twenty-redis: { condition: service_healthy }
+    environment: &twenty-env
+      NODE_PORT: 3000
+      PG_DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/twenty
+      SERVER_URL: ${TWENTY_SERVER_URL}
+      REDIS_URL: redis://twenty-redis:6379
+      ENCRYPTION_KEY: ${TWENTY_ENCRYPTION_KEY}
+      STORAGE_TYPE: local
+    volumes:
+      - twenty-storage:/app/packages/twenty-server/.local-storage
+    ports: ["${BIND_ADDRESS}:${TWENTY_PORT}:3000"]
+    healthcheck:
+      test: curl --fail http://localhost:3000/healthz
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    deploy: { resources: { limits: { cpus: "1.0", memory: 1g } } }
+    logging: *logging
+
+  twenty-worker:
+    image: ${TWENTY_IMAGE}
+    container_name: twenty-worker
+    restart: unless-stopped
+    command: ["yarn", "worker:prod"]
+    depends_on:
+      twenty-server: { condition: service_healthy }
+    environment:
+      <<: *twenty-env
+      DISABLE_DB_MIGRATIONS: "true"
+      DISABLE_CRON_JOBS_REGISTRATION: "true"
+    volumes:
+      - twenty-storage:/app/packages/twenty-server/.local-storage
+    deploy: { resources: { limits: { cpus: "0.5", memory: 512m } } }
+    logging: *logging
+
+  # ---------------------------------------------------------------------------
+  # ERPNext
+  # ---------------------------------------------------------------------------
+  erpnext-db:
+    image: ${MARIADB_IMAGE}
+    container_name: erpnext-db
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --skip-character-set-client-handshake
+      - --log-bin=mysql-bin
+      - --binlog-format=ROW
+      - --binlog-row-image=FULL
+      - --server-id=1
+      - --expire-logs-days=3
+      - --innodb-buffer-pool-size=256M
+    environment:
+      MARIADB_ROOT_PASSWORD: ${ERPNEXT_DB_ROOT_PASSWORD}
+      DEBEZIUM_PASSWORD: ${DEBEZIUM_PASSWORD}
+      AIRBYTE_READER_PASSWORD: ${AIRBYTE_READER_PASSWORD}
+    volumes:
+      - erpnext-db-data:/var/lib/mysql
+      - ./mariadb/init:/docker-entrypoint-initdb.d:ro
+    ports: ["${BIND_ADDRESS}:${ERPNEXT_DB_PORT}:3306"]
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      start_period: 10s
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    deploy: { resources: { limits: { cpus: "0.5", memory: 768m } } }
+    logging: *logging
+
+  erpnext-redis-cache:
+    image: redis:7-alpine
+    container_name: erpnext-redis-cache
+    restart: unless-stopped
+    deploy: { resources: { limits: { cpus: "0.2", memory: 128m } } }
+    logging: *logging
+
+  erpnext-redis-queue:
+    image: redis:7-alpine
+    container_name: erpnext-redis-queue
+    restart: unless-stopped
+    volumes: [erpnext-redis-queue:/data]
+    deploy: { resources: { limits: { cpus: "0.2", memory: 128m } } }
+    logging: *logging
+
+  # One-off: writes DB/Redis settings into the bench config
+  erpnext-configurator:
+    <<: *erpnext
+    container_name: erpnext-configurator
+    restart: "no"
+    entrypoint: ["bash", "-c"]
+    command:
+      - >
+        ls -1 apps > sites/apps.txt;
+        bench set-config -g db_host erpnext-db;
+        bench set-config -gp db_port 3306;
+        bench set-config -g redis_cache "redis://erpnext-redis-cache:6379";
+        bench set-config -g redis_queue "redis://erpnext-redis-queue:6379";
+        bench set-config -g redis_socketio "redis://erpnext-redis-queue:6379";
+        bench set-config -gp socketio_port 9000;
+    depends_on:
+      erpnext-db: { condition: service_healthy }
+
+  # One-off: creates the ERPNext site on first run (skipped afterwards)
+  erpnext-create-site:
+    <<: *erpnext
+    container_name: erpnext-create-site
+    restart: "no"
+    entrypoint: ["bash", "-c"]
+    command:
+      - >
+        wait-for-it -t 120 erpnext-db:3306;
+        wait-for-it -t 120 erpnext-redis-cache:6379;
+        wait-for-it -t 120 erpnext-redis-queue:6379;
+        if [ -d "sites/frontend" ]; then echo "Site exists, skipping";
+        else bench new-site --mariadb-user-host-login-scope='%'
+        --admin-password=$$ERPNEXT_ADMIN_PASSWORD --db-root-username=root
+        --db-root-password=$$ERPNEXT_DB_ROOT_PASSWORD
+        --install-app erpnext --set-default frontend; fi;
+    environment:
+      ERPNEXT_ADMIN_PASSWORD: ${ERPNEXT_ADMIN_PASSWORD}
+      ERPNEXT_DB_ROOT_PASSWORD: ${ERPNEXT_DB_ROOT_PASSWORD}
+    depends_on:
+      erpnext-configurator: { condition: service_completed_successfully }
+
+  erpnext-backend:
+    <<: *erpnext
+    container_name: erpnext-backend
+    depends_on:
+      erpnext-configurator: { condition: service_completed_successfully }
+    deploy: { resources: { limits: { cpus: "1.0", memory: 1g } } }
+
+  erpnext-worker:
+    <<: *erpnext
+    container_name: erpnext-worker
+    command: ["bench", "worker", "--queue", "long,default,short"]
+    depends_on:
+      erpnext-configurator: { condition: service_completed_successfully }
+    deploy: { resources: { limits: { cpus: "0.5", memory: 512m } } }
+
+  erpnext-scheduler:
+    <<: *erpnext
+    container_name: erpnext-scheduler
+    command: ["bench", "schedule"]
+    depends_on:
+      erpnext-configurator: { condition: service_completed_successfully }
+    deploy: { resources: { limits: { cpus: "0.2", memory: 256m } } }
+
+  erpnext-websocket:
+    <<: *erpnext
+    container_name: erpnext-websocket
+    command: ["node", "/home/frappe/frappe-bench/apps/frappe/socketio.js"]
+    depends_on:
+      erpnext-configurator: { condition: service_completed_successfully }
+    deploy: { resources: { limits: { cpus: "0.2", memory: 256m } } }
+
+  erpnext-frontend:
+    <<: *erpnext
+    container_name: erpnext-frontend
+    command: ["nginx-entrypoint.sh"]
+    environment:
+      BACKEND: erpnext-backend:8000
+      SOCKETIO: erpnext-websocket:9000
+      FRAPPE_SITE_NAME_HEADER: frontend
+      UPSTREAM_REAL_IP_ADDRESS: 127.0.0.1
+      UPSTREAM_REAL_IP_HEADER: X-Forwarded-For
+      UPSTREAM_REAL_IP_RECURSIVE: "off"
+      PROXY_READ_TIMEOUT: 120
+      CLIENT_MAX_BODY_SIZE: 50m
+    depends_on: [erpnext-backend, erpnext-websocket]
+    ports: ["${BIND_ADDRESS}:${ERPNEXT_PORT}:8080"]
+    deploy: { resources: { limits: { cpus: "0.3", memory: 128m } } }
+
+volumes:
+  postgres-data:
+  twenty-storage:
+  erpnext-db-data:
+  erpnext-redis-queue:
+  erpnext-sites:
+  erpnext-logs:
+
+networks:
+  default:
+    name: data-platform
+    external: true
