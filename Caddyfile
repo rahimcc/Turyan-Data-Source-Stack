@@ -1,0 +1,7 @@
+erp.turyan.site {
+    reverse_proxy erpnext-frontend:8080
+}
+
+crm.turyan.site { 
+    reverse_proxy twenty-server:3001
+}
