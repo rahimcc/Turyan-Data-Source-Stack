@@ -241,6 +241,11 @@ services:
       PROXY_READ_TIMEOUT: 120
       CLIENT_MAX_BODY_SIZE: 50m
     depends_on: [erpnext-backend, erpnext-websocket]
+    healthcheck:
+      test: ["CMD", "wait-for-it", "127.0.0.1:8080"]
+      interval: 2s
+      timeout: 30s
+      retries: 30
     ports: ["${BIND_ADDRESS}:${ERPNEXT_PORT}:8080"]
     deploy: { resources: { limits: { cpus: "0.3", memory: 128m } } }
 
