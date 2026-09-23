@@ -249,21 +249,6 @@ services:
     ports: ["${BIND_ADDRESS}:${ERPNEXT_PORT}:8080"]
     deploy: { resources: { limits: { cpus: "0.3", memory: 128m } } }
 
-  caddy-erp:
-    image: caddy:2-alpine
-    profiles: ["production"]
-    container_name: caddy-erp
-    restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile
-      - caddy-erp-data:/data
-      - caddy-erp-config:/config
-    depends_on:
-       erpnext-frontend:
-        condition: service_healthy
 
 
 volumes:
@@ -273,8 +258,6 @@ volumes:
   erpnext-redis-queue:
   erpnext-sites:
   erpnext-logs:
-  caddy-erp-data: {}
-  caddy-erp-config: {}
 
 
 networks:
