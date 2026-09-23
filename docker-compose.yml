@@ -244,6 +244,23 @@ services:
     ports: ["${BIND_ADDRESS}:${ERPNEXT_PORT}:8080"]
     deploy: { resources: { limits: { cpus: "0.3", memory: 128m } } }
 
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["production"]
+    container_name: caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+       airflow-webserver:
+        condition: service_healthy
+        
+
 volumes:
   postgres-data:
   twenty-storage:
@@ -251,6 +268,9 @@ volumes:
   erpnext-redis-queue:
   erpnext-sites:
   erpnext-logs:
+  caddy-data: {}
+  caddy-config: {}
+
 
 networks:
   default:
