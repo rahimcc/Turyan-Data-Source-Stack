@@ -83,11 +83,6 @@ services:
     volumes:
       - twenty-storage:/app/packages/twenty-server/.local-storage
     ports: ["${BIND_ADDRESS}:${TWENTY_PORT}:3000"]
-    healthcheck:
-      test: curl --fail http://localhost:3000/healthz
-      interval: 2s
-      timeout: 5s
-      retries: 5
     deploy: { resources: { limits: { cpus: "1.0", memory: 1g } } }
     logging: *logging
 
