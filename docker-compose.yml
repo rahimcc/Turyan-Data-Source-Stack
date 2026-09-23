@@ -257,9 +257,9 @@ services:
       - caddy-data:/data
       - caddy-config:/config
     depends_on:
-       airflow-webserver:
+       erpnext-frontend:
         condition: service_healthy
-        
+
 
 volumes:
   postgres-data:
