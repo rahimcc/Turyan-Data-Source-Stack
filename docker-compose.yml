@@ -85,9 +85,9 @@ services:
     ports: ["${BIND_ADDRESS}:${TWENTY_PORT}:3000"]
     healthcheck:
       test: curl --fail http://localhost:3000/healthz
-      interval: 10s
+      interval: 2s
       timeout: 5s
-      retries: 30
+      retries: 5
     deploy: { resources: { limits: { cpus: "1.0", memory: 1g } } }
     logging: *logging
 
